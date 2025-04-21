@@ -1,221 +1,193 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 from firestore import FirestoreDB
 from utils.response_wrapper import response_wrapper
+import bcrypt
 
 db = FirestoreDB()
 COMPANY_COLLECTION = "companies"
 
+# ---------- Helpers ----------
+def get_ist_time():
+    return (datetime.utcnow() + timedelta(hours=5, minutes=30)).strftime("%Y-%m-%d %H:%M:%S")
+
 def get_next_company_id():
-    """Fetch the next sequential company ID in PEPRE-XXXX format"""
     try:
         companies = db.get_all_documents(COMPANY_COLLECTION)
-        
+
         if not companies:
-            return "PEPRE-1000"  # Start with PEPRE-1000 if no companies exist
+            return "PEPRE-1000"
         
-        # Extract numeric part from PEPRE-XXXX format and find the max
         company_numbers = []
         for company in companies:
             if "id" in company and company["id"].startswith("PEPRE-"):
                 try:
-                    num = int(company["id"][6:])  # Extract the number after "PEPRE-"
+                    num = int(company["id"][6:])
                     company_numbers.append(num)
                 except ValueError:
-                    # Skip if not in the expected format
                     continue
         
         if not company_numbers:
-            return "PEPRE-1000"  # Start with PEPRE-1000 if no valid IDs found
-            
+            return "PEPRE-1000"
+        
         next_number = max(company_numbers) + 1
-        return f"PEPRE-{next_number}"  # Format as PEPRE-1001, PEPRE-1002, etc.
+        return f"PEPRE-{next_number}"
     except Exception as e:
         print(f"Error generating company ID: {str(e)}")
-        return "PEPRE-1000"  # Fallback to default if error occurs
+        return "PEPRE-1000"
 
+# ---------- Add Company ----------
 def add_company(data):
-    """Create a new company"""
     try:
-        required_fields = ["name", "size", "email"]
-
+        required_fields = ["companyName", "companySize", "adminEmail", "password"]
         if not data:
             return response_wrapper(400, "No data provided", None)
-            
-        # Check for missing fields
-        missing_fields = [field for field in required_fields if field not in data or data[field] in [None, ""]]
+
+        missing_fields = [f for f in required_fields if f not in data or not data[f]]
         if missing_fields:
             return response_wrapper(400, f"Missing required fields: {', '.join(missing_fields)}", None)
 
-        email = data["email"]
-
-        # Check if company already exists with this email
-        existing_companies = db.get_documents_by_field(COMPANY_COLLECTION, "email", email)
+        existing_companies = db.get_documents_by_field(COMPANY_COLLECTION, "adminEmail", data["adminEmail"])
         if existing_companies:
-            return response_wrapper(400, "Company with this email already exists", None)
+            return response_wrapper(400, "Company with this adminEmail already exists", None)
 
-        # Generate a unique company ID
         company_id = get_next_company_id()
-        
-        # Create company data
+
+        hashed_password = bcrypt.hashpw(data["password"].encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+
         company_data = {
             "id": company_id,
-            "name": data["name"],
-            "size": data["size"],
-            "email": email,
-            "created_at": datetime.utcnow().isoformat(),
-            "updated_at": datetime.utcnow().isoformat()
+            "companyName": data["companyName"],
+            "companySize": data["companySize"],
+            "adminEmail": data["adminEmail"],
+            "password": hashed_password,
+            "created_at": get_ist_time(),
+            "updated_at": get_ist_time()
         }
 
-        # Add optional fields if they exist
-        if "admin_name" in data:
-            company_data["admin_name"] = data["admin_name"]
-        if "address" in data:
-            company_data["address"] = data["address"]
-        if "phone_number" in data:
-            company_data["phone_number"] = data["phone_number"]
-        if "industry" in data:
-            company_data["industry"] = data["industry"]
-        if "website" in data:
-            company_data["website"] = data["website"]
+        optional_fields = ["adminName", "address", "phone_number", "industry", "website"]
+        for field in optional_fields:
+            if field in data:
+                company_data[field] = data[field]
 
-        # Add the document with company_id as the document ID
         db.add_document(COMPANY_COLLECTION, company_id, company_data)
-        
-        return response_wrapper(201, "Company registered successfully", company_data)
-    
-    except Exception as e:
-        error_message = f"Error creating company: {str(e)}"
-        print(error_message)
-        return response_wrapper(500, error_message, None)
 
+        # Remove password from response
+        company_data.pop("password", None)
+
+        return response_wrapper(201, "Company registered successfully", company_data)
+
+    except Exception as e:
+        return response_wrapper(500, f"Error creating company: {str(e)}", None)
+
+# ---------- Login ----------
+def login_company(email, password):
+    try:
+        if not email or not password:
+            return response_wrapper(400, "Email and password required", None)
+
+        matching = db.get_documents_by_field(COMPANY_COLLECTION, "adminEmail", email)
+        if not matching:
+            return response_wrapper(404, "Company not found", None)
+
+        company = matching[0]
+
+        if not bcrypt.checkpw(password.encode("utf-8"), company["password"].encode("utf-8")):
+            return response_wrapper(401, "Invalid password", None)
+
+        # Return company details without password
+        company.pop("password", None)
+        return response_wrapper(200, "Login successful", company)
+
+    except Exception as e:
+        return response_wrapper(500, f"Error during login: {str(e)}", None)
+
+# ---------- Fetch / Update / Delete ----------
 def get_company(company_id):
-    """Fetch company by ID"""
     try:
         if not company_id:
             return response_wrapper(400, "Company ID is required", None)
-
         company = db.get_document(COMPANY_COLLECTION, company_id)
         if not company:
             return response_wrapper(404, "Company not found", None)
-
+        company.pop("password", None)
         return response_wrapper(200, "Company details fetched", company)
-    
     except Exception as e:
-        error_message = f"Error fetching company: {str(e)}"
-        print(error_message)
-        return response_wrapper(500, error_message, None)
+        return response_wrapper(500, f"Error fetching company: {str(e)}", None)
 
 def get_all_companies():
-    """Fetch all companies"""
     try:
         companies = db.get_all_documents(COMPANY_COLLECTION)
+        for c in companies:
+            c.pop("password", None)
         return response_wrapper(200, "All companies fetched", companies)
-    
     except Exception as e:
-        error_message = f"Error fetching all companies: {str(e)}"
-        print(error_message)
-        return response_wrapper(500, error_message, None)
+        return response_wrapper(500, f"Error fetching all companies: {str(e)}", None)
 
 def update_company(company_id, data):
-    """Update an existing company"""
     try:
         if not company_id:
             return response_wrapper(400, "Company ID is required", None)
-            
-        # Check if company exists
-        existing_company = db.get_document(COMPANY_COLLECTION, company_id)
-        if not existing_company:
+
+        existing = db.get_document(COMPANY_COLLECTION, company_id)
+        if not existing:
             return response_wrapper(404, "Company not found", None)
-            
-        # Check if email is being updated and is already in use by another company
-        if "email" in data and data["email"] != existing_company["email"]:
-            existing_emails = db.get_documents_by_field(COMPANY_COLLECTION, "email", data["email"])
-            for comp in existing_emails:
-                if comp["id"] != company_id:  # If email belongs to a different company
-                    return response_wrapper(400, "Email already in use by another company", None)
-        
-        # Add last updated timestamp
-        data["updated_at"] = datetime.utcnow().isoformat()
-        
-        # Update company data
+
+        if "adminEmail" in data and data["adminEmail"] != existing["adminEmail"]:
+            duplicates = db.get_documents_by_field(COMPANY_COLLECTION, "adminEmail", data["adminEmail"])
+            if any(d["id"] != company_id for d in duplicates):
+                return response_wrapper(400, "Email already in use by another company", None)
+
+        data["updated_at"] = get_ist_time()
+
         db.update_document(COMPANY_COLLECTION, company_id, data)
-        
-        # Fetch updated company data
-        updated_company = db.get_document(COMPANY_COLLECTION, company_id)
-        
-        return response_wrapper(200, "Company updated successfully", updated_company)
-    
+        updated = db.get_document(COMPANY_COLLECTION, company_id)
+        updated.pop("password", None)
+
+        return response_wrapper(200, "Company updated successfully", updated)
     except Exception as e:
-        error_message = f"Error updating company: {str(e)}"
-        print(error_message)
-        return response_wrapper(500, error_message, None)
+        return response_wrapper(500, f"Error updating company: {str(e)}", None)
 
 def delete_company(company_id):
-    """Delete a company"""
     try:
         if not company_id:
             return response_wrapper(400, "Company ID is required", None)
-            
-        # Check if company exists
-        company = db.get_document(COMPANY_COLLECTION, company_id)
-        if not company:
-            return response_wrapper(404, "Company not found", None)
-            
-        # Delete the company
-        db.delete_document(COMPANY_COLLECTION, company_id)
-        
-        return response_wrapper(200, "Company deleted successfully", {"id": company_id})
-    
-    except Exception as e:
-        error_message = f"Error deleting company: {str(e)}"
-        print(error_message)
-        return response_wrapper(500, error_message, None)
 
-def search_companies(query, field="name"):
-    """Search for companies by field"""
+        if not db.get_document(COMPANY_COLLECTION, company_id):
+            return response_wrapper(404, "Company not found", None)
+
+        db.delete_document(COMPANY_COLLECTION, company_id)
+        return response_wrapper(200, "Company deleted successfully", {"id": company_id})
+    except Exception as e:
+        return response_wrapper(500, f"Error deleting company: {str(e)}", None)
+
+# ---------- Filter / Search ----------
+def search_companies(query, field="companyName"):
     try:
         if not query:
             return response_wrapper(400, "Search query is required", None)
-            
         companies = db.get_all_documents(COMPANY_COLLECTION)
-        
-        filtered_companies = []
-        for company in companies:
-            if field in company and query.lower() in str(company[field]).lower():
-                filtered_companies.append(company)
-        
-        return response_wrapper(200, f"Found {len(filtered_companies)} matching companies", filtered_companies)
-    
+        filtered = [c for c in companies if field in c and query.lower() in str(c[field]).lower()]
+        for c in filtered:
+            c.pop("password", None)
+        return response_wrapper(200, f"Found {len(filtered)} matching companies", filtered)
     except Exception as e:
-        error_message = f"Error searching companies: {str(e)}"
-        print(error_message)
-        return response_wrapper(500, error_message, None)
+        return response_wrapper(500, f"Error searching companies: {str(e)}", None)
 
 def get_companies_by_size(size):
-    """Get companies by size"""
     try:
         if not size:
             return response_wrapper(400, "Company size is required", None)
-            
         companies = db.get_all_documents(COMPANY_COLLECTION)
-        filtered_companies = [comp for comp in companies if comp.get("size", "").lower() == size.lower()]
-        
-        return response_wrapper(200, f"Found {len(filtered_companies)} companies of size '{size}'", 
-                            filtered_companies)
-    
+        filtered = [c for c in companies if c.get("companySize", "").lower() == size.lower()]
+        for c in filtered:
+            c.pop("password", None)
+        return response_wrapper(200, f"Found {len(filtered)} companies of size '{size}'", filtered)
     except Exception as e:
-        error_message = f"Error fetching companies by size: {str(e)}"
-        print(error_message)
-        return response_wrapper(500, error_message, None)
+        return response_wrapper(500, f"Error filtering companies: {str(e)}", None)
 
 def verify_company_exists(company_id):
-    """Check if a company exists"""
     try:
         company = db.get_document(COMPANY_COLLECTION, company_id)
-        return response_wrapper(200, "Company exists" if company else "Company does not exist",
-                              {"exists": bool(company)})
-    
+        return response_wrapper(200, "Company exists" if company else "Company does not exist", {"exists": bool(company)})
     except Exception as e:
-        error_message = f"Error verifying company: {str(e)}"
-        print(error_message)
-        return response_wrapper(500, error_message, None)
+        return response_wrapper(500, f"Error verifying company: {str(e)}", None)
